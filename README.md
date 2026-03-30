@@ -44,7 +44,7 @@ MicroScan 是一个开源的显微镜图像拼接工具，可搭配数码显微�
 
 ```bash
 # 克隆仓库
-git clone https://github.com/YOUR_USERNAME/MicroScan.git
+git clone https://github.com/yyy10tsinghua/MicroScan.git
 cd MicroScan
 
 # 安装依赖
