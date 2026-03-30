@@ -15,11 +15,11 @@ os.environ.setdefault("OPENCV_LOG_LEVEL", "SILENT")
 class MicroscopeCamera:
     """Interface for USB digital microscope cameras."""
 
-    # Backend priority: MSMF works best on modern Windows; DSHOW as fallback;
-    # then the default auto-selection.
+    # Backend priority: DSHOW first because MSMF often fails to read inside
+    # Qt event loops on Windows. AUTO (which picks MSMF) is last resort.
     _BACKENDS = [
-        ("MSMF", cv2.CAP_MSMF),
         ("DSHOW", cv2.CAP_DSHOW),
+        ("MSMF", cv2.CAP_MSMF),
         ("AUTO", cv2.CAP_ANY),
     ]
 
@@ -52,9 +52,9 @@ class MicroscopeCamera:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
 
-            # Warm-up reads to let backend settle
+            # Warm-up: try a few reads to let backend settle
             ok = False
-            for _ in range(10):
+            for _ in range(3):
                 try:
                     ret, frame = cap.read()
                     if ret and frame is not None and frame.size > 0:

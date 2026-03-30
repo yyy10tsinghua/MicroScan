@@ -306,11 +306,14 @@ class MainWindow(QMainWindow):
                 self.status_bar.showMessage("Please select a camera or type a device number (e.g. 0)")
                 return
 
-        if self.camera.open(device_id):
-            # Apply selected resolution (reopens camera internally)
-            res_text = self.res_combo.currentText()
-            w, h = map(int, res_text.split('x'))
-            self.camera.set_resolution(w, h)
+        self.status_bar.showMessage(f"Connecting to Camera {device_id}...")
+        QApplication.processEvents()  # Show the message immediately
+
+        # Open camera directly with the desired resolution (avoid double-open)
+        res_text = self.res_combo.currentText()
+        w, h = map(int, res_text.split('x'))
+
+        if self.camera.open(device_id, w, h):
 
             actual_w, actual_h = self.camera.get_resolution()
             self.btn_connect.setText("Disconnect")
