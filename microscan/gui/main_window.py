@@ -307,7 +307,7 @@ class MainWindow(QMainWindow):
                 return
 
         if self.camera.open(device_id):
-            # Set resolution
+            # Apply selected resolution (reopens camera internally)
             res_text = self.res_combo.currentText()
             w, h = map(int, res_text.split('x'))
             self.camera.set_resolution(w, h)
@@ -374,6 +374,8 @@ class MainWindow(QMainWindow):
 
     def _on_camera_frame(self):
         """Called by timer to process camera frames."""
+        if not self.camera.is_open:
+            return
         frame = self.camera.read_frame()
         if frame is None:
             return

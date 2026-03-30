@@ -32,21 +32,42 @@ class MicroscopeCamera:
     def is_open(self) -> bool:
         return self.cap is not None and self.cap.isOpened()
 
-    def open(self, device_id: int = 0) -> bool:
-        """Open camera device, trying multiple backends."""
+    def open(self, device_id: int = 0, width: int = 0, height: int = 0) -> bool:
+        """Open camera device, trying multiple backends.
+        If width/height are given, set resolution before first read."""
         self.close()
         self.device_id = device_id
 
         for name, backend in self._BACKENDS:
-            cap = cv2.VideoCapture(device_id, backend)
-            if cap.isOpened():
-                # Verify we can actually read a frame
-                ret, _ = cap.read()
-                if ret:
-                    self.cap = cap
-                    self.backend_name = name
-                    return True
+            try:
+                cap = cv2.VideoCapture(device_id, backend)
+            except cv2.error:
+                continue
+            if not cap.isOpened():
                 cap.release()
+                continue
+
+            # Set resolution before first read so backend configures properly
+            if width > 0 and height > 0:
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+
+            # Warm-up reads to let backend settle
+            ok = False
+            for _ in range(10):
+                try:
+                    ret, frame = cap.read()
+                    if ret and frame is not None and frame.size > 0:
+                        ok = True
+                        break
+                except cv2.error:
+                    pass
+
+            if ok:
+                self.cap = cap
+                self.backend_name = name
+                return True
+            cap.release()
 
         return False
 
@@ -61,16 +82,19 @@ class MicroscopeCamera:
         """Capture a single frame."""
         if not self.is_open:
             return None
-        ret, frame = self.cap.read()
-        return frame if ret else None
+        try:
+            ret, frame = self.cap.read()
+            return frame if ret else None
+        except cv2.error:
+            return None
 
     def set_resolution(self, width: int, height: int) -> bool:
-        """Set camera resolution."""
+        """Set camera resolution by reopening with new settings."""
         if not self.is_open:
             return False
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        return True
+        # Reopen with new resolution to avoid backend instability
+        device_id = self.device_id
+        return self.open(device_id, width, height)
 
     def get_resolution(self) -> Tuple[int, int]:
         """Get current resolution (width, height)."""
