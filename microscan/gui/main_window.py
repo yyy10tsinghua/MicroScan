@@ -23,6 +23,15 @@ from ..video_stitcher import VideoStitcher
 from ..overlap import ScanStatus
 
 
+class CameraDetectWorker(QThread):
+    """Background thread for camera detection (avoids blocking GUI)."""
+    finished = pyqtSignal(list)
+
+    def run(self):
+        cameras = MicroscopeCamera.list_cameras()
+        self.finished.emit(cameras)
+
+
 class VideoWorker(QThread):
     """Background thread for video processing."""
     progress = pyqtSignal(float, str)
@@ -72,9 +81,9 @@ class MainWindow(QMainWindow):
 
         # Video worker
         self.video_worker = None
+        self._camera_detect_worker = None
 
         self._build_ui()
-        self._detect_cameras()
 
     def _build_ui(self):
         central = QWidget()
@@ -108,10 +117,13 @@ class MainWindow(QMainWindow):
         # Camera selection
         controls.addWidget(QLabel("Camera:"))
         self.camera_combo = QComboBox()
-        self.camera_combo.setMinimumWidth(130)
+        self.camera_combo.setEditable(True)
+        self.camera_combo.setMinimumWidth(160)
+        self.camera_combo.addItem("Click Refresh to detect", None)
         controls.addWidget(self.camera_combo)
 
-        self.btn_refresh_cam = QPushButton("Refresh")
+        self.btn_refresh_cam = QPushButton("🔍 Refresh")
+        self.btn_refresh_cam.setToolTip("Detect connected cameras")
         self.btn_refresh_cam.clicked.connect(self._detect_cameras)
         controls.addWidget(self.btn_refresh_cam)
 
@@ -250,15 +262,28 @@ class MainWindow(QMainWindow):
     # ── Camera Management ──────────────────────────────────────────
 
     def _detect_cameras(self):
+        """Detect cameras in a background thread to avoid freezing the GUI."""
+        if self._camera_detect_worker and self._camera_detect_worker.isRunning():
+            return
+        self.btn_refresh_cam.setEnabled(False)
+        self.btn_refresh_cam.setText("Detecting...")
+        self.status_bar.showMessage("Detecting cameras...")
+        self._camera_detect_worker = CameraDetectWorker()
+        self._camera_detect_worker.finished.connect(self._on_cameras_detected)
+        self._camera_detect_worker.start()
+
+    def _on_cameras_detected(self, cameras: list):
+        """Handle camera detection results."""
+        self.btn_refresh_cam.setEnabled(True)
+        self.btn_refresh_cam.setText("🔍 Refresh")
         self.camera_combo.clear()
-        cameras = MicroscopeCamera.list_cameras()
         if cameras:
             for cam_id in cameras:
                 self.camera_combo.addItem(f"Camera {cam_id}", cam_id)
             self.status_bar.showMessage(f"Found {len(cameras)} camera(s)")
         else:
-            self.camera_combo.addItem("No cameras found")
-            self.status_bar.showMessage("No cameras detected")
+            self.camera_combo.addItem("No cameras found", None)
+            self.status_bar.showMessage("No cameras detected — you can type a device ID manually")
 
     def _toggle_camera(self):
         if self.camera.is_open:
@@ -273,7 +298,13 @@ class MainWindow(QMainWindow):
 
         device_id = self.camera_combo.currentData()
         if device_id is None:
-            return
+            # Try parsing the text as a device ID (user typed manually)
+            text = self.camera_combo.currentText().strip()
+            try:
+                device_id = int(text)
+            except ValueError:
+                self.status_bar.showMessage("Please select a camera or type a device number (e.g. 0)")
+                return
 
         if self.camera.open(device_id):
             # Set resolution
