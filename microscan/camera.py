@@ -3,36 +3,59 @@ Camera capture module for digital microscopes.
 Wraps OpenCV VideoCapture with resolution configuration.
 """
 
+import os
 import cv2
 import numpy as np
 from typing import Optional, Tuple, List
+
+# Suppress noisy OpenCV backend warnings (DSHOW/MSMF/obsensor)
+os.environ.setdefault("OPENCV_LOG_LEVEL", "SILENT")
 
 
 class MicroscopeCamera:
     """Interface for USB digital microscope cameras."""
 
+    # Backend priority: MSMF works best on modern Windows; DSHOW as fallback;
+    # then the default auto-selection.
+    _BACKENDS = [
+        ("MSMF", cv2.CAP_MSMF),
+        ("DSHOW", cv2.CAP_DSHOW),
+        ("AUTO", cv2.CAP_ANY),
+    ]
+
     def __init__(self):
         self.cap: Optional[cv2.VideoCapture] = None
         self.device_id: int = 0
+        self.backend_name: str = ""
 
     @property
     def is_open(self) -> bool:
         return self.cap is not None and self.cap.isOpened()
 
     def open(self, device_id: int = 0) -> bool:
-        """Open camera device."""
+        """Open camera device, trying multiple backends."""
         self.close()
         self.device_id = device_id
-        self.cap = cv2.VideoCapture(device_id, cv2.CAP_DSHOW)
-        if not self.cap.isOpened():
-            self.cap = cv2.VideoCapture(device_id)
-        return self.is_open
+
+        for name, backend in self._BACKENDS:
+            cap = cv2.VideoCapture(device_id, backend)
+            if cap.isOpened():
+                # Verify we can actually read a frame
+                ret, _ = cap.read()
+                if ret:
+                    self.cap = cap
+                    self.backend_name = name
+                    return True
+                cap.release()
+
+        return False
 
     def close(self):
         """Release camera."""
         if self.cap is not None:
             self.cap.release()
             self.cap = None
+        self.backend_name = ""
 
     def read_frame(self) -> Optional[np.ndarray]:
         """Capture a single frame."""
@@ -64,16 +87,17 @@ class MicroscopeCamera:
 
     @staticmethod
     def list_cameras(max_check: int = 5) -> List[int]:
-        """List available camera device IDs."""
+        """List available camera device IDs by trying multiple backends."""
         available = []
         for i in range(max_check):
-            cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-            if cap.isOpened():
-                available.append(i)
-                cap.release()
-            else:
-                cap = cv2.VideoCapture(i)
+            for _, backend in MicroscopeCamera._BACKENDS:
+                cap = cv2.VideoCapture(i, backend)
                 if cap.isOpened():
-                    available.append(i)
+                    ret, _ = cap.read()
+                    cap.release()
+                    if ret:
+                        available.append(i)
+                        break  # found a working backend for this id
+                else:
                     cap.release()
         return available

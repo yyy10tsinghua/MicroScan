@@ -312,12 +312,18 @@ class MainWindow(QMainWindow):
             w, h = map(int, res_text.split('x'))
             self.camera.set_resolution(w, h)
 
+            actual_w, actual_h = self.camera.get_resolution()
             self.btn_connect.setText("Disconnect")
             self.btn_start_scan.setEnabled(True)
             self.camera_timer.start(33)  # ~30 FPS
-            self.status_bar.showMessage(f"Connected to Camera {device_id}")
+            self.status_bar.showMessage(
+                f"Connected to Camera {device_id} via {self.camera.backend_name} "
+                f"({actual_w}×{actual_h})"
+            )
         else:
-            self.status_bar.showMessage("Failed to connect to camera")
+            self.status_bar.showMessage(
+                "Failed to connect to camera — try a different device ID"
+            )
 
     def _disconnect_camera(self):
         if self.scanner.is_scanning:

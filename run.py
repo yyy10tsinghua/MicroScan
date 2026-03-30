@@ -4,6 +4,10 @@ Usage:
     python run.py
 """
 
+import os
+# Suppress noisy OpenCV backend probe warnings (DSHOW/MSMF/obsensor)
+os.environ["OPENCV_LOG_LEVEL"] = "FATAL"
+
 import sys
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
