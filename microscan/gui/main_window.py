@@ -8,19 +8,22 @@ import cv2
 import numpy as np
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QLabel, QComboBox, QFileDialog, QSplitter, QGroupBox,
+    QLabel, QComboBox, QFileDialog, QSplitter, QGroupBox, QGridLayout,
     QProgressBar, QStatusBar, QTabWidget, QSpinBox, QCheckBox,
     QSlider, QMessageBox, QApplication
 )
+from typing import Optional
+
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
-from PyQt5.QtGui import QFont, QIcon
+from PyQt5.QtGui import QFont, QIcon, QCloseEvent
 
 from .camera_widget import CameraWidget
 from .canvas_widget import CanvasWidget
 from ..camera import MicroscopeCamera
 from ..scanner import MicroscopeScanner
 from ..video_stitcher import VideoStitcher
-from ..overlap import ScanStatus
+from ..overlap import GuidanceInfo, ScanStatus
+from ..quality import FrameQualityAnalyzer
 
 
 class CameraDetectWorker(QThread):
@@ -72,6 +75,10 @@ class MainWindow(QMainWindow):
         # Core components
         self.camera = MicroscopeCamera()
         self.scanner = MicroscopeScanner()
+        self.preview_analyzer = FrameQualityAnalyzer()
+        self._preview_reference_frame = None
+        self._preview_frame_counter = 0
+        self._last_preview_assessment = None
 
         # Timers
         self.camera_timer = QTimer()
@@ -84,6 +91,8 @@ class MainWindow(QMainWindow):
         self._camera_detect_worker = None
 
         self._build_ui()
+        self._reset_live_feedback(clear_preview=True)
+        QTimer.singleShot(0, self._detect_cameras)
 
     def _build_ui(self):
         central = QWidget()
@@ -166,7 +175,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(controls)
 
         # Main content: Camera + Panorama
-        splitter = QSplitter(Qt.Horizontal)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
 
         # Left: Camera view
         left_group = QGroupBox("Camera Preview")
@@ -178,6 +187,9 @@ class MainWindow(QMainWindow):
         self.lbl_scan_info = QLabel("Images: 0 | Panorama: —")
         self.lbl_scan_info.setFont(QFont("Consolas", 9))
         left_layout.addWidget(self.lbl_scan_info)
+
+        self.live_inspector = self._build_live_inspector()
+        left_layout.addWidget(self.live_inspector)
 
         splitter.addWidget(left_group)
 
@@ -199,6 +211,154 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(splitter)
         return tab
+
+    def _build_live_inspector(self) -> QGroupBox:
+        group = QGroupBox("Stitchability Inspector")
+        layout = QGridLayout(group)
+        layout.setHorizontalSpacing(14)
+        layout.setVerticalSpacing(6)
+
+        labels = [
+            ("Camera", "lbl_camera_state_value"),
+            ("Mode", "lbl_scan_state_value"),
+            ("Verdict", "lbl_stitchability_value"),
+            ("Focus", "lbl_focus_value"),
+            ("Texture", "lbl_texture_value"),
+            ("Brightness", "lbl_brightness_value"),
+            ("Motion", "lbl_motion_value"),
+            ("Match", "lbl_match_value"),
+        ]
+
+        for row, (title, attr_name) in enumerate(labels):
+            title_label = QLabel(f"{title}:")
+            value_label = QLabel("—")
+            value_label.setFont(QFont("Consolas", 9))
+            layout.addWidget(title_label, row, 0)
+            layout.addWidget(value_label, row, 1)
+            setattr(self, attr_name, value_label)
+
+        return group
+
+    def _reset_live_feedback(self, clear_preview: bool = False):
+        self._preview_reference_frame = None
+        self._preview_frame_counter = 0
+        self._last_preview_assessment = None
+        self.lbl_scan_info.setText("Images: 0 | Panorama: —")
+        self.lbl_camera_state_value.setText("Disconnected")
+        self.lbl_scan_state_value.setText("Idle")
+        self.lbl_stitchability_value.setText("Awaiting camera")
+        self.lbl_stitchability_value.setStyleSheet("color: #dcdcdc;")
+        self.lbl_focus_value.setText("—")
+        self.lbl_texture_value.setText("—")
+        self.lbl_brightness_value.setText("—")
+        self.lbl_motion_value.setText("—")
+        self.lbl_match_value.setText("—")
+        if clear_preview:
+            self.camera_widget.clear()
+
+    def _evaluate_preview_frame(self, frame: np.ndarray):
+        self._preview_frame_counter += 1
+        should_run = (
+            self._last_preview_assessment is None or
+            self._preview_frame_counter % 3 == 0
+        )
+
+        if should_run:
+            assessment = self.preview_analyzer.analyze(frame, self._preview_reference_frame)
+            if assessment.is_frame_usable and (
+                self._preview_reference_frame is None or
+                assessment.is_pair_stitchable or
+                assessment.match_confidence >= 0.12 or
+                assessment.motion_pixels > self.preview_analyzer.max_motion_pixels
+            ):
+                self._preview_reference_frame = frame.copy()
+            self._last_preview_assessment = assessment
+        else:
+            assessment = self._last_preview_assessment
+
+        return assessment, self._preview_guidance_from_assessment(assessment)
+
+    def _preview_guidance_from_assessment(self, assessment) -> GuidanceInfo:
+        if assessment is None:
+            return GuidanceInfo(status=ScanStatus.IDLE, message="Awaiting preview")
+
+        if assessment.is_pair_stitchable:
+            status = ScanStatus.PREVIEW_READY
+            confidence = assessment.match_confidence
+        elif assessment.is_frame_usable:
+            status = ScanStatus.PREVIEW_WARNING
+            confidence = assessment.match_confidence or assessment.frame_score
+        else:
+            status = ScanStatus.POOR_QUALITY
+            confidence = assessment.frame_score
+
+        return GuidanceInfo(
+            status=status,
+            message=assessment.summary,
+            confidence=confidence
+        )
+
+    def _update_live_feedback_panel(self, assessment, guidance: GuidanceInfo):
+        if self.camera.is_open:
+            self.lbl_camera_state_value.setText(
+                f"Cam {self.camera.device_id} ({self.camera.backend_name})"
+            )
+        else:
+            self.lbl_camera_state_value.setText("Disconnected")
+
+        self.lbl_scan_state_value.setText("Scanning" if self.scanner.is_scanning else "Preview")
+
+        verdict_text = guidance.message or (assessment.summary if assessment else "Awaiting frames")
+        self.lbl_stitchability_value.setText(verdict_text)
+        if assessment is not None and assessment.is_pair_stitchable:
+            verdict_color = "#67d78a"
+        elif assessment is not None and assessment.is_frame_usable:
+            verdict_color = "#f0c25b"
+        else:
+            verdict_color = "#ef7f7f"
+        self.lbl_stitchability_value.setStyleSheet(f"color: {verdict_color}; font-weight: bold;")
+
+        if assessment is None:
+            self.lbl_focus_value.setText("—")
+            self.lbl_texture_value.setText("—")
+            self.lbl_brightness_value.setText("—")
+            self.lbl_motion_value.setText("—")
+            self.lbl_match_value.setText("—")
+            return
+
+        self.lbl_focus_value.setText(f"{assessment.focus_score:.0f}")
+        self.lbl_texture_value.setText(str(assessment.texture_points))
+        self.lbl_brightness_value.setText(f"{assessment.brightness:.0f}")
+        self.lbl_motion_value.setText(
+            f"{assessment.motion_pixels:.1f}px" if assessment.motion_pixels > 0 else "—"
+        )
+        self.lbl_match_value.setText(
+            f"{assessment.match_confidence:.0%}" if assessment.match_confidence > 0 else "—"
+        )
+
+    def _update_scan_info_label(self, assessment, guidance: GuidanceInfo):
+        pano_w, pano_h = self.scanner.get_panorama_size()
+        pano_text = f"{pano_w}×{pano_h}" if pano_w and pano_h else "—"
+
+        if self.scanner.is_scanning:
+            self.lbl_scan_info.setText(
+                f"Images: {self.scanner.image_count} | "
+                f"Panorama: {pano_text} | "
+                f"Overlap: {guidance.overlap:.0%} | "
+                f"Conf: {guidance.confidence:.0%}"
+            )
+            return
+
+        if assessment is None:
+            self.lbl_scan_info.setText("Images: 0 | Panorama: —")
+            return
+
+        preview_conf = assessment.match_confidence if assessment.match_confidence > 0 else assessment.frame_score
+        self.lbl_scan_info.setText(
+            f"Preview | Focus: {assessment.focus_score:.0f} | "
+            f"Texture: {assessment.texture_points} | "
+            f"Confidence: {preview_conf:.0%}"
+        )
 
     # ── Video Import Tab ───────────────────────────────────────────
 
@@ -316,6 +476,7 @@ class MainWindow(QMainWindow):
         if self.camera.open(device_id, w, h):
 
             actual_w, actual_h = self.camera.get_resolution()
+            self._reset_live_feedback(clear_preview=False)
             self.btn_connect.setText("Disconnect")
             self.btn_start_scan.setEnabled(True)
             self.camera_timer.start(33)  # ~30 FPS
@@ -335,6 +496,7 @@ class MainWindow(QMainWindow):
         self.camera_timer.stop()
         self.pano_update_timer.stop()
         self.camera.close()
+        self._reset_live_feedback(clear_preview=True)
         self.btn_connect.setText("Connect")
         self.btn_start_scan.setEnabled(False)
         self.btn_force_stitch.setEnabled(False)
@@ -345,7 +507,13 @@ class MainWindow(QMainWindow):
             return
         res_text = self.res_combo.currentText()
         w, h = map(int, res_text.split('x'))
-        self.camera.set_resolution(w, h)
+        if self.camera.set_resolution(w, h):
+            self._preview_reference_frame = None
+            self._last_preview_assessment = None
+            actual_w, actual_h = self.camera.get_resolution()
+            self.status_bar.showMessage(
+                f"Camera resolution changed to {actual_w}×{actual_h}"
+            )
 
     # ── Scanning ───────────────────────────────────────────────────
 
@@ -360,6 +528,7 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("Scanning stopped")
         else:
             self.scanner.start_scanning()
+            self._last_preview_assessment = None
             self.canvas_widget.reset_view()
             self.pano_update_timer.start(500)  # Update panorama every 500ms
             self.btn_start_scan.setText("⏹ Stop Scan")
@@ -387,16 +556,13 @@ class MainWindow(QMainWindow):
 
         if self.scanner.is_scanning:
             guidance = self.scanner.process_frame(frame)
-            self.camera_widget.update_guidance(guidance)
+            assessment = self.scanner.last_quality
+        else:
+            assessment, guidance = self._evaluate_preview_frame(frame)
 
-            # Update scan info
-            pano_size = self.scanner.get_panorama_size()
-            self.lbl_scan_info.setText(
-                f"Images: {self.scanner.image_count} | "
-                f"Panorama: {pano_size[0]}×{pano_size[1]} | "
-                f"Overlap: {guidance.overlap:.0%} | "
-                f"Conf: {guidance.confidence:.0%}"
-            )
+        self.camera_widget.update_guidance(guidance)
+        self._update_live_feedback_panel(assessment, guidance)
+        self._update_scan_info_label(assessment, guidance)
 
     def _update_panorama_view(self):
         """Periodically update the panorama display."""
@@ -491,11 +657,12 @@ class MainWindow(QMainWindow):
 
     # ── Cleanup ────────────────────────────────────────────────────
 
-    def closeEvent(self, event):
+    def closeEvent(self, a0: Optional[QCloseEvent]):
         self.camera_timer.stop()
         self.pano_update_timer.stop()
         self.camera.close()
         if self.video_worker and self.video_worker.isRunning():
             self.video_worker.cancel()
             self.video_worker.wait()
-        event.accept()
+        if a0 is not None:
+            a0.accept()

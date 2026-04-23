@@ -2,9 +2,11 @@
 Camera preview widget with overlay for guidance information.
 """
 
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel, QSizePolicy
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QFont, QPen
+from typing import Optional
+
+from PyQt5.QtWidgets import QWidget, QSizePolicy
+from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QFont, QPen, QPaintEvent
 import cv2
 import numpy as np
 from ..overlap import GuidanceInfo, ScanStatus, Direction
@@ -17,7 +19,7 @@ class CameraWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._frame: np.ndarray = None
+        self._frame: Optional[np.ndarray] = None
         self._guidance: GuidanceInfo = GuidanceInfo()
         self._show_overlay: bool = True
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -33,16 +35,32 @@ class CameraWidget(QWidget):
         self._guidance = guidance
         self.update()
 
+    def clear(self):
+        """Clear the preview frame and overlay."""
+        self._frame = None
+        self._guidance = GuidanceInfo()
+        self.update()
+
     def set_overlay_visible(self, visible: bool):
         self._show_overlay = visible
         self.update()
 
-    def paintEvent(self, event):
-        if self._frame is None:
-            return
-
+    def paintEvent(self, a0: Optional[QPaintEvent]):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        painter.fillRect(self.rect(), QColor(22, 22, 22))
+
+        if self._frame is None:
+            painter.setPen(QColor(120, 120, 120))
+            font = QFont("Consolas", 12)
+            painter.setFont(font)
+            painter.drawText(
+                self.rect(),
+                Qt.AlignmentFlag.AlignCenter,
+                "Connect a camera to start preview\nOverlay will show stitchability hints"
+            )
+            painter.end()
+            return
 
         # Convert frame to QPixmap
         frame_rgb = cv2.cvtColor(self._frame, cv2.COLOR_BGR2RGB)
@@ -51,7 +69,11 @@ class CameraWidget(QWidget):
         pixmap = QPixmap.fromImage(qimg)
 
         # Scale to widget keeping aspect ratio
-        scaled = pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        scaled = pixmap.scaled(
+            self.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
         x = (self.width() - scaled.width()) // 2
         y = (self.height() - scaled.height()) // 2
         painter.drawPixmap(x, y, scaled)
@@ -86,7 +108,7 @@ class CameraWidget(QWidget):
         # Status text
         status_text = g.message or g.status.value
         painter.drawText(x + 8, y + h - bar_h + 4, w - 16, bar_h - 8,
-                         Qt.AlignLeft | Qt.AlignVCenter, status_text)
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, status_text)
 
         # Overlap percentage bar (top-right)
         if g.overlap > 0:
@@ -114,7 +136,7 @@ class CameraWidget(QWidget):
         painter.setPen(QColor(255, 255, 255))
         font = QFont("Consolas", 8)
         painter.setFont(font)
-        painter.drawText(x, y, w, h, Qt.AlignCenter, f"{overlap:.0%}")
+        painter.drawText(x, y, w, h, Qt.AlignmentFlag.AlignCenter, f"{overlap:.0%}")
 
     def _draw_direction_arrow(self, painter: QPainter, cx: int, cy: int,
                               direction: Direction, color: QColor):

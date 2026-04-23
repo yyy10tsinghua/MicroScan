@@ -11,12 +11,15 @@ from typing import Optional
 
 class ScanStatus(Enum):
     IDLE = "idle"
+    PREVIEW_READY = "preview_ready"
+    PREVIEW_WARNING = "preview_warning"
     INITIALIZED = "initialized"
     TRACKING = "tracking"
     STITCHED = "stitched"
     GOOD_OVERLAP = "good_overlap"
     TOO_MUCH_OVERLAP = "too_much_overlap"
     TOO_LITTLE_OVERLAP = "too_little_overlap"
+    POOR_QUALITY = "poor_quality"
     LOST = "lost"
 
 
@@ -46,12 +49,16 @@ class GuidanceInfo:
     @property
     def color(self):
         """Color for GUI overlay: (B, G, R)."""
-        if self.status == ScanStatus.GOOD_OVERLAP:
+        if self.status in (ScanStatus.PREVIEW_READY, ScanStatus.GOOD_OVERLAP):
             return (0, 255, 0)       # Green
+        elif self.status == ScanStatus.PREVIEW_WARNING:
+            return (0, 220, 255)     # Yellow
         elif self.status == ScanStatus.STITCHED:
             return (0, 255, 128)     # Light green
         elif self.status in (ScanStatus.TOO_MUCH_OVERLAP, ScanStatus.TOO_LITTLE_OVERLAP):
             return (0, 200, 255)     # Yellow
+        elif self.status == ScanStatus.POOR_QUALITY:
+            return (0, 120, 255)     # Orange
         elif self.status == ScanStatus.LOST:
             return (0, 0, 255)       # Red
         elif self.status == ScanStatus.TRACKING:

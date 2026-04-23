@@ -7,6 +7,7 @@ from typing import Optional
 from .stitcher import ImageStitcher, MatchResult
 from .canvas import PanoramaCanvas
 from .overlap import OverlapAnalyzer, GuidanceInfo, ScanStatus
+from .quality import FrameQualityAnalyzer, QualityAssessment
 
 
 class MicroscopeScanner:
@@ -16,8 +17,10 @@ class MicroscopeScanner:
         self.stitcher = ImageStitcher()
         self.canvas = PanoramaCanvas(blend_mode='feather')
         self.analyzer = OverlapAnalyzer()
+        self.quality_analyzer = FrameQualityAnalyzer()
 
         self.last_frame: Optional[np.ndarray] = None
+        self.last_quality: Optional[QualityAssessment] = None
         self.current_dx: float = 0.0
         self.current_dy: float = 0.0
         self.last_stitch_dx: float = 0.0
@@ -36,6 +39,7 @@ class MicroscopeScanner:
         self.current_dy = 0.0
         self.last_stitch_dx = 0.0
         self.last_stitch_dy = 0.0
+        self.last_quality = None
         self.is_scanning = True
         self._frame_count = 0
 
@@ -49,18 +53,34 @@ class MicroscopeScanner:
             return GuidanceInfo(status=ScanStatus.IDLE, message="Not scanning")
 
         self._frame_count += 1
+        quality = self.quality_analyzer.analyze(frame, self.last_frame)
+        self.last_quality = quality
 
         # First frame: initialize
         if self.last_frame is None:
+            if not quality.is_frame_usable:
+                return GuidanceInfo(
+                    status=ScanStatus.POOR_QUALITY,
+                    message=quality.summary,
+                    confidence=quality.frame_score
+                )
             self.canvas.initialize(frame)
             self.last_frame = frame.copy()
             return GuidanceInfo(
                 status=ScanStatus.INITIALIZED,
-                message="Scanning started - move the sample slowly"
+                message="Scanning started - move the sample slowly",
+                confidence=quality.frame_score
+            )
+
+        if not quality.is_frame_usable:
+            return GuidanceInfo(
+                status=ScanStatus.POOR_QUALITY,
+                message=quality.summary,
+                confidence=quality.frame_score
             )
 
         # Find translation from last frame
-        match = self.stitcher.find_translation(self.last_frame, frame)
+        match = quality.match or self.stitcher.find_translation(self.last_frame, frame)
 
         if match.confidence < 0.1:
             return GuidanceInfo(
@@ -93,6 +113,7 @@ class MicroscopeScanner:
 
         # Auto-stitch if conditions are met
         if (self.auto_stitch and
+            quality.is_pair_stitchable and
                 move_since_stitch >= self.min_move_since_stitch and
                 self.analyzer.should_stitch(overlap, match.confidence)):
             self.canvas.add_image(frame, self.current_dx, self.current_dy)
@@ -109,12 +130,17 @@ class MicroscopeScanner:
         if not self.is_scanning:
             return False
 
+        quality = self.quality_analyzer.analyze(frame, self.last_frame)
+        self.last_quality = quality
+        if not quality.is_frame_usable:
+            return False
+
         if self.last_frame is None:
             self.canvas.initialize(frame)
             self.last_frame = frame.copy()
             return True
 
-        match = self.stitcher.find_translation(self.last_frame, frame)
+        match = quality.match or self.stitcher.find_translation(self.last_frame, frame)
         self.current_dx += match.dx
         self.current_dy += match.dy
 
